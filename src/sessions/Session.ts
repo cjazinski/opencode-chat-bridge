@@ -55,6 +55,7 @@ export class Session extends EventEmitter {
   private pendingOutput: string[] = [];
   private accumulatedText: string = '';
   private pendingPermissions: Map<string, Permission> = new Map();
+  private isSwitchingProject: boolean = false;
 
   constructor(chatId: string, userId: string, projectPath: string) {
     super();
@@ -211,7 +212,10 @@ export class Session extends EventEmitter {
     this.openCodeClient.on('closed', () => {
       logger.info('OpenCode client closed');
       this.status = 'terminated';
-      this.emit('terminated');
+      // Don't emit 'terminated' if we're just switching projects
+      if (!this.isSwitchingProject) {
+        this.emit('terminated');
+      }
     });
   }
 
@@ -362,16 +366,23 @@ export class Session extends EventEmitter {
    * Switch to a different project directory
    */
   async switchProject(newProjectPath: string): Promise<void> {
-    // Terminate current session
-    await this.terminate();
+    // Set flag to prevent 'terminated' event from being emitted
+    this.isSwitchingProject = true;
 
-    // Update project path
-    this.projectPath = newProjectPath;
-    this.status = 'idle';
+    try {
+      // Terminate current session
+      await this.terminate();
 
-    // Start a new session
-    await this.start();
-    this.touch();
+      // Update project path
+      this.projectPath = newProjectPath;
+      this.status = 'idle';
+
+      // Start a new session
+      await this.start();
+      this.touch();
+    } finally {
+      this.isSwitchingProject = false;
+    }
   }
 
   /**
