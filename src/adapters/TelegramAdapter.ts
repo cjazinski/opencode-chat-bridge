@@ -16,6 +16,8 @@ interface StreamingState {
   accumulatedText: string;
   updateTimeoutId: NodeJS.Timeout | null;
   isComplete: boolean;
+  isInitializing: boolean;
+  pendingDeltas: string[];
 }
 
 /** Thinking indicator state (used before streaming starts) */
@@ -699,11 +701,29 @@ export class TelegramAdapter implements ChatAdapter {
    * Handle incoming streaming delta from the session
    */
   private handleStreamingDelta(chatId: string, delta: string): void {
-    const state = this.streamingStates.get(chatId);
+    let state = this.streamingStates.get(chatId);
 
     if (!state) {
-      // First streaming delta - convert thinking message to streaming message
+      // First streaming delta - create a placeholder state immediately to prevent race conditions
+      state = {
+        messageId: 0, // Will be set by initializeStreaming
+        lastUpdateTime: Date.now(),
+        accumulatedText: delta,
+        updateTimeoutId: null,
+        isComplete: false,
+        isInitializing: true,
+        pendingDeltas: [],
+      };
+      this.streamingStates.set(chatId, state);
+
+      // Initialize the streaming message (async)
       this.initializeStreaming(chatId, delta);
+      return;
+    }
+
+    // If still initializing, queue the delta
+    if (state.isInitializing) {
+      state.pendingDeltas.push(delta);
       return;
     }
 
@@ -741,30 +761,43 @@ export class TelegramAdapter implements ChatAdapter {
             chatId,
             thinkingState.messageId,
             undefined,
-            initialText + ' ▌'
+            initialText
           );
           messageId = thinkingState.messageId;
         } catch {
           // If edit fails, send a new message
-          const msg = await this.bot.telegram.sendMessage(chatId, initialText + ' ▌');
+          const msg = await this.bot.telegram.sendMessage(chatId, initialText);
           messageId = msg.message_id;
         }
       } else {
         // No thinking message, send a new one
-        const msg = await this.bot.telegram.sendMessage(chatId, initialText + ' ▌');
+        const msg = await this.bot.telegram.sendMessage(chatId, initialText);
         messageId = msg.message_id;
       }
 
-      // Initialize streaming state
-      this.streamingStates.set(chatId, {
-        messageId,
-        lastUpdateTime: Date.now(),
-        accumulatedText: initialText,
-        updateTimeoutId: null,
-        isComplete: false,
-      });
+      // Update the streaming state with the message ID and process pending deltas
+      const state = this.streamingStates.get(chatId);
+      if (state) {
+        state.messageId = messageId;
+        state.isInitializing = false;
+
+        // Add any pending deltas that arrived during initialization
+        if (state.pendingDeltas.length > 0) {
+          state.accumulatedText += state.pendingDeltas.join('');
+          state.pendingDeltas = [];
+
+          // Schedule an update to show the accumulated text
+          if (!state.updateTimeoutId) {
+            state.updateTimeoutId = setTimeout(() => {
+              this.flushStreamingUpdate(chatId);
+            }, STREAM_UPDATE_INTERVAL);
+          }
+        }
+      }
     } catch (error) {
       logger.error('Failed to initialize streaming:', error);
+      // Clean up on error
+      this.streamingStates.delete(chatId);
     }
   }
 
@@ -787,10 +820,7 @@ export class TelegramAdapter implements ChatAdapter {
           '...\n\n_(streaming truncated, will show full response when complete)_';
       }
 
-      // Add cursor indicator
-      const textWithCursor = displayText + ' ▌';
-
-      await this.bot.telegram.editMessageText(chatId, state.messageId, undefined, textWithCursor);
+      await this.bot.telegram.editMessageText(chatId, state.messageId, undefined, displayText);
 
       // Send typing action to show we're still working
       await this.bot.telegram.sendChatAction(chatId, 'typing');
