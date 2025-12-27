@@ -9,12 +9,27 @@ import fs from 'fs';
 import path from 'path';
 import type { Session } from '@/sessions/Session.js';
 
-/** Thinking indicator state */
+/** Streaming message state */
+interface StreamingState {
+  messageId: number;
+  lastUpdateTime: number;
+  accumulatedText: string;
+  updateTimeoutId: NodeJS.Timeout | null;
+  isComplete: boolean;
+}
+
+/** Thinking indicator state (used before streaming starts) */
 interface ThinkingState {
   messageId: number;
   intervalId: NodeJS.Timeout;
   startTime: number;
 }
+
+/** Minimum interval between message edits (ms) to respect Telegram rate limits */
+const STREAM_UPDATE_INTERVAL = 1500;
+
+/** Maximum text length before we stop streaming and wait for completion */
+const MAX_STREAMING_LENGTH = 3500;
 
 /** Thinking phrases to cycle through */
 const THINKING_PHRASES = [
@@ -34,6 +49,7 @@ export class TelegramAdapter implements ChatAdapter {
   private bot: Telegraf;
   private isRunning: boolean = false;
   private thinkingStates: Map<string, ThinkingState> = new Map();
+  private streamingStates: Map<string, StreamingState> = new Map();
 
   constructor() {
     if (!config.telegramBotToken) {
@@ -419,12 +435,12 @@ export class TelegramAdapter implements ChatAdapter {
 
   /**
    * Set up output handler for a session
-   * Now handles structured output from OpenCode Server API
+   * Now handles structured output from OpenCode Server API with streaming support
    */
   private setupSessionOutput(chatId: string, session: Session | undefined): void {
     if (!session) return;
 
-    // Handle regular output
+    // Handle regular output (called when session becomes idle with complete response)
     session.onOutput(async (data: string) => {
       // Stop thinking indicator when we get output
       await this.stopThinking(chatId);
@@ -432,6 +448,13 @@ export class TelegramAdapter implements ChatAdapter {
       try {
         // Check if this looks like a permission request
         if (data.includes('*Permission Required*')) {
+          // Clean up any streaming state first
+          const streamState = this.streamingStates.get(chatId);
+          if (streamState?.updateTimeoutId) {
+            clearTimeout(streamState.updateTimeoutId);
+          }
+          this.streamingStates.delete(chatId);
+
           await this.bot.telegram.sendMessage(chatId, data, {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
@@ -445,14 +468,8 @@ export class TelegramAdapter implements ChatAdapter {
           return;
         }
 
-        // Chunk and send output
-        const chunks = chunkMessage(data, 4096);
-
-        for (const chunk of chunks) {
-          await this.bot.telegram.sendMessage(chatId, chunk, {
-            parse_mode: 'Markdown',
-          });
-        }
+        // Use streaming finalization to update the existing message or send new one
+        await this.finalizeStreaming(chatId, data);
       } catch (error) {
         logger.error('Failed to send output to Telegram:', error);
         // Try without markdown if it fails (might have unescaped characters)
@@ -486,14 +503,18 @@ export class TelegramAdapter implements ChatAdapter {
       }
     });
 
-    // Handle streaming text
-    // For now, we accumulate and let session.idle send the full response
-    // In the future, we could implement message editing for live updates
+    // Handle streaming text - update message periodically as text arrives
+    session.on('streaming', (delta: string) => {
+      this.handleStreamingDelta(chatId, delta);
+    });
 
     // Handle errors
     session.on('error', async (error) => {
       // Stop thinking indicator on error
       await this.stopThinking(chatId);
+
+      // Clean up streaming state
+      await this.cleanupStreaming(chatId);
 
       try {
         await this.bot.telegram.sendMessage(chatId, `❌ Error: ${error.message}`);
@@ -506,6 +527,9 @@ export class TelegramAdapter implements ChatAdapter {
     session.on('terminated', async () => {
       // Stop thinking indicator on termination
       await this.stopThinking(chatId);
+
+      // Clean up streaming state
+      await this.cleanupStreaming(chatId);
 
       try {
         await this.bot.telegram.sendMessage(
@@ -647,5 +671,202 @@ export class TelegramAdapter implements ChatAdapter {
     }
 
     this.thinkingStates.delete(chatId);
+  }
+
+  /**
+   * Clean up streaming state without finalizing (used on errors/termination)
+   */
+  private async cleanupStreaming(chatId: string): Promise<void> {
+    const state = this.streamingStates.get(chatId);
+    if (!state) return;
+
+    // Clear any pending update timeout
+    if (state.updateTimeoutId) {
+      clearTimeout(state.updateTimeoutId);
+    }
+
+    // Delete the streaming message if it exists
+    try {
+      await this.bot.telegram.deleteMessage(chatId, state.messageId);
+    } catch {
+      // Ignore delete errors
+    }
+
+    this.streamingStates.delete(chatId);
+  }
+
+  /**
+   * Handle incoming streaming delta from the session
+   */
+  private handleStreamingDelta(chatId: string, delta: string): void {
+    const state = this.streamingStates.get(chatId);
+
+    if (!state) {
+      // First streaming delta - convert thinking message to streaming message
+      this.initializeStreaming(chatId, delta);
+      return;
+    }
+
+    // Accumulate the text
+    state.accumulatedText += delta;
+
+    // Schedule an update if we're not already waiting for one
+    if (!state.updateTimeoutId) {
+      const timeSinceLastUpdate = Date.now() - state.lastUpdateTime;
+      const delay = Math.max(0, STREAM_UPDATE_INTERVAL - timeSinceLastUpdate);
+
+      state.updateTimeoutId = setTimeout(() => {
+        this.flushStreamingUpdate(chatId);
+      }, delay);
+    }
+  }
+
+  /**
+   * Initialize streaming by converting the thinking message to a streaming message
+   */
+  private async initializeStreaming(chatId: string, initialText: string): Promise<void> {
+    // Stop the thinking indicator first
+    const thinkingState = this.thinkingStates.get(chatId);
+
+    try {
+      let messageId: number;
+
+      if (thinkingState) {
+        // Edit the thinking message to show initial streaming text
+        clearInterval(thinkingState.intervalId);
+        this.thinkingStates.delete(chatId);
+
+        try {
+          await this.bot.telegram.editMessageText(
+            chatId,
+            thinkingState.messageId,
+            undefined,
+            initialText + ' ▌'
+          );
+          messageId = thinkingState.messageId;
+        } catch {
+          // If edit fails, send a new message
+          const msg = await this.bot.telegram.sendMessage(chatId, initialText + ' ▌');
+          messageId = msg.message_id;
+        }
+      } else {
+        // No thinking message, send a new one
+        const msg = await this.bot.telegram.sendMessage(chatId, initialText + ' ▌');
+        messageId = msg.message_id;
+      }
+
+      // Initialize streaming state
+      this.streamingStates.set(chatId, {
+        messageId,
+        lastUpdateTime: Date.now(),
+        accumulatedText: initialText,
+        updateTimeoutId: null,
+        isComplete: false,
+      });
+    } catch (error) {
+      logger.error('Failed to initialize streaming:', error);
+    }
+  }
+
+  /**
+   * Flush accumulated streaming text to Telegram
+   */
+  private async flushStreamingUpdate(chatId: string): Promise<void> {
+    const state = this.streamingStates.get(chatId);
+    if (!state || state.isComplete) return;
+
+    state.updateTimeoutId = null;
+    state.lastUpdateTime = Date.now();
+
+    try {
+      // Truncate if too long for a single message
+      let displayText = state.accumulatedText;
+      if (displayText.length > MAX_STREAMING_LENGTH) {
+        displayText =
+          displayText.substring(0, MAX_STREAMING_LENGTH) +
+          '...\n\n_(streaming truncated, will show full response when complete)_';
+      }
+
+      // Add cursor indicator
+      const textWithCursor = displayText + ' ▌';
+
+      await this.bot.telegram.editMessageText(chatId, state.messageId, undefined, textWithCursor);
+
+      // Send typing action to show we're still working
+      await this.bot.telegram.sendChatAction(chatId, 'typing');
+    } catch (error) {
+      // Ignore edit errors (message might be deleted or unchanged)
+      logger.debug('Failed to update streaming message:', error);
+    }
+  }
+
+  /**
+   * Finalize streaming when the response is complete
+   * Called when session output is received (which happens on session.idle)
+   */
+  private async finalizeStreaming(chatId: string, finalText: string): Promise<void> {
+    const state = this.streamingStates.get(chatId);
+
+    // Clear any pending update timeout
+    if (state?.updateTimeoutId) {
+      clearTimeout(state.updateTimeoutId);
+    }
+
+    // Clean up streaming state
+    this.streamingStates.delete(chatId);
+
+    if (state) {
+      // Edit the streaming message with final text (removing cursor)
+      try {
+        // Check if we need to chunk the message
+        if (finalText.length <= 4096) {
+          await this.bot.telegram.editMessageText(chatId, state.messageId, undefined, finalText, {
+            parse_mode: 'Markdown',
+          });
+        } else {
+          // Delete the streaming message and send chunked response
+          try {
+            await this.bot.telegram.deleteMessage(chatId, state.messageId);
+          } catch {
+            // Ignore delete errors
+          }
+
+          // Send chunked messages
+          const chunks = chunkMessage(finalText, 4096);
+          for (const chunk of chunks) {
+            await this.bot.telegram.sendMessage(chatId, chunk, {
+              parse_mode: 'Markdown',
+            });
+          }
+        }
+        return; // Successfully handled via streaming message
+      } catch (error) {
+        logger.debug('Failed to finalize streaming message, will send new message:', error);
+        // Fall through to send new message
+        try {
+          await this.bot.telegram.deleteMessage(chatId, state.messageId);
+        } catch {
+          // Ignore delete errors
+        }
+      }
+    }
+
+    // No streaming state or edit failed - send as new message(s)
+    try {
+      const chunks = chunkMessage(finalText, 4096);
+      for (const chunk of chunks) {
+        await this.bot.telegram.sendMessage(chatId, chunk, {
+          parse_mode: 'Markdown',
+        });
+      }
+    } catch (error) {
+      logger.error('Failed to send final message:', error);
+      // Try without markdown
+      try {
+        await this.bot.telegram.sendMessage(chatId, finalText);
+      } catch (retryError) {
+        logger.error('Failed to send plain text final message:', retryError);
+      }
+    }
   }
 }
