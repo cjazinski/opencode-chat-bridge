@@ -216,6 +216,9 @@ export class OpenCodeClient extends EventEmitter {
    * Handle an incoming event from the SSE stream
    */
   private handleEvent(event: Event): void {
+    // Debug: log event type (not full properties to avoid noise)
+    logger.debug(`[SSE] type=${event.type}`);
+
     switch (event.type) {
       case 'message.part.updated':
         this.emit('message.part.updated', event.properties);

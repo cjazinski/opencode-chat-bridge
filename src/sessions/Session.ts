@@ -131,45 +131,64 @@ export class Session extends EventEmitter {
   private setupEventHandlers(): void {
     if (!this.openCodeClient) return;
 
+    logger.debug(`Setting up event handlers for session ${this.id}`);
+
     // Handle message part updates (streaming)
     this.openCodeClient.on('message.part.updated', ({ part, delta }) => {
+      logger.debug(`[SSE] message.part.updated: type=${part.type}, hasDelta=${!!delta}`);
       this.touch();
 
-      // For text parts with delta, emit streaming event
-      if (part.type === 'text' && delta) {
-        this.accumulatedText += delta;
-        this.emit('streaming', delta);
+      // For text parts, accumulate the text
+      if (part.type === 'text') {
+        if (delta) {
+          // Streaming delta
+          this.accumulatedText += delta;
+          this.emit('streaming', delta);
+        } else if ('text' in part && part.text) {
+          // Full text update - replace accumulated text
+          this.accumulatedText = part.text;
+        }
       }
     });
 
     // Handle message completion
     this.openCodeClient.on('message.updated', ({ info }) => {
+      logger.debug(`[SSE] message.updated: id=${info.id}, role=${info.role}`);
       this.touch();
-      logger.debug(`Message updated: ${info.id}, role: ${info.role}`);
     });
 
     // Handle session status changes
     this.openCodeClient.on('session.status', ({ sessionID, status }) => {
+      logger.debug(`[SSE] session.status: sessionID=${sessionID}, status=${status.type}`);
       if (sessionID !== this.opencodeSessionId) return;
-
-      logger.debug(`Session status: ${status.type}`);
 
       if (status.type === 'busy') {
         this.status = 'busy';
         this.emit('statusChange', 'busy');
+      } else if (status.type === 'idle') {
+        // Also handle idle status here as a fallback
+        logger.debug(`[SSE] session.status idle detected, flushing text. Length=${this.accumulatedText.length}`);
+        this.status = 'active';
+        this.emit('statusChange', 'active');
+        
+        if (this.accumulatedText) {
+          this.sendOutput(this.accumulatedText);
+          this.accumulatedText = '';
+        }
       }
     });
 
     // Handle session idle
     this.openCodeClient.on('session.idle', ({ sessionID }) => {
+      logger.debug(`[SSE] session.idle: sessionID=${sessionID}, accumulatedText.length=${this.accumulatedText.length}`);
       if (sessionID !== this.opencodeSessionId) return;
 
-      logger.debug('Session idle');
       this.status = 'active';
       this.emit('statusChange', 'active');
 
       // Flush any accumulated text
       if (this.accumulatedText) {
+        logger.debug(`Flushing accumulated text (${this.accumulatedText.length} chars)`);
         this.sendOutput(this.accumulatedText);
         this.accumulatedText = '';
       }
@@ -358,6 +377,7 @@ export class Session extends EventEmitter {
     if (this.outputCallback) {
       this.outputCallback(data);
     } else {
+      logger.debug(`No output callback set, buffering output (${data.length} chars)`);
       this.pendingOutput.push(data);
     }
   }

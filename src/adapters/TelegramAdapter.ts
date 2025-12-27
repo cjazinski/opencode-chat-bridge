@@ -347,6 +347,8 @@ export class TelegramAdapter implements ChatAdapter {
     const userId = String(ctx.from?.id);
     const text = (ctx.message as { text?: string })?.text || '';
 
+    logger.info(`Received message from ${chatId}: "${text.substring(0, 50)}..."`);
+
     // Get or create session
     let session = sessionManager.get(chatId);
 
@@ -365,6 +367,8 @@ export class TelegramAdapter implements ChatAdapter {
       this.setupSessionOutput(chatId, session);
     }
 
+    logger.info(`Session status: ${session.getStatus()}, isRunning: ${session.isRunning()}`);
+
     // Start if not running
     if (!session.isRunning()) {
       try {
@@ -380,7 +384,9 @@ export class TelegramAdapter implements ChatAdapter {
 
     // Send the message
     try {
+      logger.info(`Sending message to OpenCode session...`);
       await session.sendMessage(text);
+      logger.info(`Message sent successfully`);
     } catch (error) {
       logger.error('Failed to send message:', error);
       await ctx.reply('❌ Failed to send message to OpenCode');
