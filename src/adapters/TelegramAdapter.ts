@@ -350,7 +350,7 @@ export class TelegramAdapter implements ChatAdapter {
     this.suppressTerminationMessage.add(chatId);
 
     if (await sessionManager.clear(chatId)) {
-      await ctx.reply('🧹 Session cleared. Send a message to start a new one.');
+      await ctx.reply('🧹 Session cleared.');
     } else {
       await ctx.reply('📊 No active session to clear.');
     }
