@@ -473,6 +473,10 @@ export class Session extends EventEmitter {
     this.status = 'terminated';
     this.pendingPermissions.clear();
     this.offOutput();
-    this.emit('terminated');
+
+    // Don't emit 'terminated' if we're just switching projects
+    if (!this.isSwitchingProject) {
+      this.emit('terminated');
+    }
   }
 }
