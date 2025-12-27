@@ -46,7 +46,7 @@ async function main(): Promise<void> {
     }
 
     // Shutdown sessions (will persist them)
-    sessionManager.shutdown();
+    await sessionManager.shutdown();
 
     logger.info('Shutdown complete');
     process.exit(0);

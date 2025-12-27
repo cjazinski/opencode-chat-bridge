@@ -1,7 +1,10 @@
 import { v4 as uuidv4 } from 'uuid';
-import { PtyHandler } from '@/pty/PtyHandler.js';
+import { EventEmitter } from 'events';
+import { OpenCodeClient } from '@/opencode/OpenCodeClient.js';
 import { logger } from '@/utils/logger.js';
+import { formatParts, formatPermissionRequest } from '@/utils/messageFormatter.js';
 import config from '@/config';
+import type { Part, Permission } from '@opencode-ai/sdk';
 
 export interface SessionData {
   id: string;
@@ -10,14 +13,34 @@ export interface SessionData {
   projectPath: string;
   createdAt: Date;
   lastActivity: Date;
+  opencodeSessionId?: string;
 }
 
 export type SessionStatus = 'idle' | 'active' | 'busy' | 'terminated';
 
 /**
- * Represents a single OpenCode session tied to a chat user
+ * Session events
  */
-export class Session {
+export interface SessionEvents {
+  /** Emitted when there is output to display */
+  output: (data: string) => void;
+  /** Emitted when streaming text arrives */
+  streaming: (text: string) => void;
+  /** Emitted when a permission is requested */
+  permission: (permission: Permission) => void;
+  /** Emitted when session status changes */
+  statusChange: (status: SessionStatus) => void;
+  /** Emitted when session has an error */
+  error: (error: Error) => void;
+  /** Emitted when session is terminated */
+  terminated: () => void;
+}
+
+/**
+ * Represents a single OpenCode session tied to a chat user
+ * Uses the OpenCode Server API instead of PTY for clean structured output
+ */
+export class Session extends EventEmitter {
   public readonly id: string;
   public readonly chatId: string;
   public readonly userId: string;
@@ -25,12 +48,16 @@ export class Session {
   public readonly createdAt: Date;
   public lastActivity: Date;
 
-  private ptyHandler: PtyHandler;
+  private openCodeClient: OpenCodeClient | null = null;
+  private opencodeSessionId: string | null = null;
   private status: SessionStatus = 'idle';
   private outputCallback: ((data: string) => void) | null = null;
   private pendingOutput: string[] = [];
+  private accumulatedText: string = '';
+  private pendingPermissions: Map<string, Permission> = new Map();
 
   constructor(chatId: string, userId: string, projectPath: string) {
+    super();
     this.id = uuidv4();
     this.chatId = chatId;
     this.userId = userId;
@@ -38,78 +65,265 @@ export class Session {
     this.createdAt = new Date();
     this.lastActivity = new Date();
 
-    this.ptyHandler = new PtyHandler();
-    this.setupHandlers();
-
     logger.info(`Session created: ${this.id} for user ${userId} at ${projectPath}`);
   }
 
   /**
-   * Set up event handlers for the PTY process
+   * Type-safe event emitter methods
    */
-  private setupHandlers(): void {
-    this.ptyHandler.on('data', (data: string) => {
-      if (this.outputCallback) {
-        this.outputCallback(data);
-      } else {
-        this.pendingOutput.push(data);
-      }
-    });
+  override on<K extends keyof SessionEvents>(event: K, listener: SessionEvents[K]): this {
+    return super.on(event, listener);
+  }
 
-    this.ptyHandler.on('exit', (code: number) => {
-      logger.info(`Session ${this.id} process exited with code ${code}`);
-      this.status = 'terminated';
-    });
-
-    this.ptyHandler.on('error', (error: Error) => {
-      logger.error(`Session ${this.id} error:`, error);
-    });
+  override emit<K extends keyof SessionEvents>(
+    event: K,
+    ...args: Parameters<SessionEvents[K]>
+  ): boolean {
+    return super.emit(event, ...args);
   }
 
   /**
-   * Start the OpenCode process
+   * Start the OpenCode session
    */
-  start(): void {
+  async start(): Promise<void> {
     if (this.status !== 'idle') {
       throw new Error(`Session is ${this.status}, cannot start`);
     }
 
-    this.ptyHandler.spawn({
-      command: config.opencodeCommand,
-      cwd: this.projectPath,
+    try {
+      logger.info(`Starting OpenCode session for ${this.id} in ${this.projectPath}`);
+
+      // Create the OpenCode client
+      this.openCodeClient = new OpenCodeClient({
+        port: config.opencodeServerPort,
+        hostname: config.opencodeServerHostname,
+        directory: this.projectPath,
+        autoStart: false,
+      });
+
+      // Wait for it to be ready
+      await this.openCodeClient.start();
+
+      // Set up event handlers
+      this.setupEventHandlers();
+
+      // Create an OpenCode session
+      const session = await this.openCodeClient.createSession(`Chat ${this.chatId}`);
+      this.opencodeSessionId = session.id;
+
+      this.status = 'active';
+      this.touch();
+
+      logger.info(
+        `OpenCode session started: ${this.opencodeSessionId} for bridge session ${this.id}`
+      );
+    } catch (error) {
+      logger.error(`Failed to start OpenCode session for ${this.id}:`, error);
+      this.status = 'terminated';
+      throw error;
+    }
+  }
+
+  /**
+   * Set up event handlers for the OpenCode client
+   */
+  private setupEventHandlers(): void {
+    if (!this.openCodeClient) return;
+
+    // Handle message part updates (streaming)
+    this.openCodeClient.on('message.part.updated', ({ part, delta }) => {
+      this.touch();
+
+      // For text parts with delta, emit streaming event
+      if (part.type === 'text' && delta) {
+        this.accumulatedText += delta;
+        this.emit('streaming', delta);
+      }
     });
 
-    this.status = 'active';
-    this.touch();
+    // Handle message completion
+    this.openCodeClient.on('message.updated', ({ info }) => {
+      this.touch();
+      logger.debug(`Message updated: ${info.id}, role: ${info.role}`);
+    });
+
+    // Handle session status changes
+    this.openCodeClient.on('session.status', ({ sessionID, status }) => {
+      if (sessionID !== this.opencodeSessionId) return;
+
+      logger.debug(`Session status: ${status.type}`);
+
+      if (status.type === 'busy') {
+        this.status = 'busy';
+        this.emit('statusChange', 'busy');
+      }
+    });
+
+    // Handle session idle
+    this.openCodeClient.on('session.idle', ({ sessionID }) => {
+      if (sessionID !== this.opencodeSessionId) return;
+
+      logger.debug('Session idle');
+      this.status = 'active';
+      this.emit('statusChange', 'active');
+
+      // Flush any accumulated text
+      if (this.accumulatedText) {
+        this.sendOutput(this.accumulatedText);
+        this.accumulatedText = '';
+      }
+    });
+
+    // Handle permission requests
+    this.openCodeClient.on('permission.updated', (permission) => {
+      if (permission.sessionID !== this.opencodeSessionId) return;
+
+      logger.info(`Permission requested: ${permission.id}`);
+      this.pendingPermissions.set(permission.id, permission);
+
+      // Format and emit permission request
+      const formatted = formatPermissionRequest({
+        id: permission.id,
+        title: permission.title,
+        metadata: permission.metadata,
+      });
+      this.sendOutput(formatted);
+      this.emit('permission', permission);
+    });
+
+    // Handle session errors
+    this.openCodeClient.on('session.error', ({ sessionID, error }) => {
+      if (sessionID && sessionID !== this.opencodeSessionId) return;
+
+      logger.error(`Session error:`, error);
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      this.sendOutput(` Error: ${errorMessage}`);
+      this.emit('error', error instanceof Error ? error : new Error(String(error)));
+    });
+
+    // Handle client errors
+    this.openCodeClient.on('error', (error) => {
+      logger.error(`OpenCode client error:`, error);
+      this.emit('error', error);
+    });
+
+    // Handle client closed
+    this.openCodeClient.on('closed', () => {
+      logger.info('OpenCode client closed');
+      this.status = 'terminated';
+      this.emit('terminated');
+    });
   }
 
   /**
-   * Send a message to the OpenCode process
+   * Send a message to the OpenCode session
    */
-  sendMessage(message: string): void {
-    if (!this.ptyHandler.isRunning()) {
-      throw new Error('OpenCode process is not running');
+  async sendMessage(message: string): Promise<void> {
+    if (!this.openCodeClient || !this.opencodeSessionId) {
+      throw new Error('OpenCode session is not running');
     }
 
-    this.ptyHandler.writeLine(message);
     this.status = 'busy';
     this.touch();
+    this.accumulatedText = '';
+
+    try {
+      // Send message asynchronously (use SSE for response)
+      await this.openCodeClient.sendMessageAsync(this.opencodeSessionId, message);
+    } catch (error) {
+      logger.error('Failed to send message:', error);
+      this.status = 'active';
+      throw error;
+    }
   }
 
   /**
-   * Send a confirmation response (y/n)
+   * Send a message and wait for the complete response
    */
-  sendConfirmation(confirm: boolean): void {
-    this.ptyHandler.writeLine(confirm ? 'y' : 'n');
+  async sendMessageSync(message: string): Promise<{ text: string; parts: Part[] }> {
+    if (!this.openCodeClient || !this.opencodeSessionId) {
+      throw new Error('OpenCode session is not running');
+    }
+
+    this.status = 'busy';
+    this.touch();
+
+    try {
+      const response = await this.openCodeClient.sendMessage(this.opencodeSessionId, message);
+      this.status = 'active';
+      this.touch();
+
+      const text = formatParts(response.parts);
+      return { text, parts: response.parts };
+    } catch (error) {
+      logger.error('Failed to send message:', error);
+      this.status = 'active';
+      throw error;
+    }
+  }
+
+  /**
+   * Reply to a permission request
+   */
+  async replyToPermission(
+    permissionId: string,
+    response: 'once' | 'always' | 'reject'
+  ): Promise<void> {
+    if (!this.openCodeClient || !this.opencodeSessionId) {
+      throw new Error('OpenCode session is not running');
+    }
+
+    const permission = this.pendingPermissions.get(permissionId);
+    if (!permission) {
+      logger.warn(`Permission ${permissionId} not found in pending permissions`);
+    }
+
+    await this.openCodeClient.replyToPermission(this.opencodeSessionId, permissionId, response);
+    this.pendingPermissions.delete(permissionId);
     this.touch();
   }
 
   /**
-   * Interrupt the current operation (Ctrl+C)
+   * Reply to the most recent permission request
    */
-  interrupt(): void {
-    this.ptyHandler.interrupt();
-    this.status = 'active';
+  async replyToLatestPermission(response: 'once' | 'always' | 'reject'): Promise<void> {
+    const permissions = Array.from(this.pendingPermissions.values());
+    if (permissions.length === 0) {
+      throw new Error('No pending permission requests');
+    }
+
+    const latest = permissions[permissions.length - 1];
+    await this.replyToPermission(latest.id, response);
+  }
+
+  /**
+   * Send a confirmation response (for backward compatibility)
+   * Maps to permission response
+   */
+  async sendConfirmation(confirm: boolean): Promise<void> {
+    try {
+      await this.replyToLatestPermission(confirm ? 'once' : 'reject');
+    } catch (error) {
+      logger.warn('No pending permission to confirm:', error);
+    }
+    this.touch();
+  }
+
+  /**
+   * Interrupt the current operation
+   */
+  async interrupt(): Promise<void> {
+    if (!this.openCodeClient || !this.opencodeSessionId) {
+      return;
+    }
+
+    try {
+      await this.openCodeClient.abortSession(this.opencodeSessionId);
+      this.status = 'active';
+      this.sendOutput(' Operation interrupted');
+    } catch (error) {
+      logger.error('Failed to abort session:', error);
+    }
     this.touch();
   }
 
@@ -134,28 +348,29 @@ export class Session {
   }
 
   /**
+   * Send output to the callback or buffer it
+   */
+  private sendOutput(data: string): void {
+    if (this.outputCallback) {
+      this.outputCallback(data);
+    } else {
+      this.pendingOutput.push(data);
+    }
+  }
+
+  /**
    * Switch to a different project directory
    */
-  switchProject(newProjectPath: string): void {
-    if (this.ptyHandler.isRunning()) {
-      // Exit current OpenCode session
-      this.ptyHandler.writeLine('/exit');
-      // Give it a moment, then kill if needed
-      setTimeout(() => {
-        if (this.ptyHandler.isRunning()) {
-          this.ptyHandler.kill();
-        }
+  async switchProject(newProjectPath: string): Promise<void> {
+    // Terminate current session
+    await this.terminate();
 
-        this.projectPath = newProjectPath;
-        this.status = 'idle';
-        this.start();
-      }, 500);
-    } else {
-      this.projectPath = newProjectPath;
-      this.status = 'idle';
-      this.start();
-    }
+    // Update project path
+    this.projectPath = newProjectPath;
+    this.status = 'idle';
 
+    // Start a new session
+    await this.start();
     this.touch();
   }
 
@@ -182,10 +397,29 @@ export class Session {
   }
 
   /**
-   * Check if PTY process is running
+   * Check if session is running
    */
   isRunning(): boolean {
-    return this.ptyHandler.isRunning();
+    return (
+      this.openCodeClient !== null &&
+      this.openCodeClient.ready &&
+      this.status !== 'terminated' &&
+      this.status !== 'idle'
+    );
+  }
+
+  /**
+   * Get the OpenCode session ID
+   */
+  getOpencodeSessionId(): string | null {
+    return this.opencodeSessionId;
+  }
+
+  /**
+   * Get pending permissions
+   */
+  getPendingPermissions(): Permission[] {
+    return Array.from(this.pendingPermissions.values());
   }
 
   /**
@@ -199,20 +433,35 @@ export class Session {
       projectPath: this.projectPath,
       createdAt: this.createdAt,
       lastActivity: this.lastActivity,
+      opencodeSessionId: this.opencodeSessionId || undefined,
     };
   }
 
   /**
    * Terminate the session
    */
-  terminate(): void {
+  async terminate(): Promise<void> {
     logger.info(`Terminating session ${this.id}`);
 
-    if (this.ptyHandler.isRunning()) {
-      this.ptyHandler.kill();
+    if (this.openCodeClient) {
+      // Try to delete the OpenCode session
+      if (this.opencodeSessionId) {
+        try {
+          await this.openCodeClient.deleteSession(this.opencodeSessionId);
+        } catch (error) {
+          logger.warn(`Failed to delete OpenCode session:`, error);
+        }
+      }
+
+      // Close the client
+      await this.openCodeClient.close();
+      this.openCodeClient = null;
     }
 
+    this.opencodeSessionId = null;
     this.status = 'terminated';
+    this.pendingPermissions.clear();
     this.offOutput();
+    this.emit('terminated');
   }
 }

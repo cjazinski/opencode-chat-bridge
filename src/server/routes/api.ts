@@ -64,9 +64,9 @@ router.get('/sessions/:chatId', requireApiKey, (req: Request, res: Response) => 
  * Clear a session
  * DELETE /api/sessions/:chatId
  */
-router.delete('/sessions/:chatId', requireApiKey, (req: Request, res: Response) => {
+router.delete('/sessions/:chatId', requireApiKey, async (req: Request, res: Response) => {
   const { chatId } = req.params;
-  const cleared = sessionManager.clear(chatId);
+  const cleared = await sessionManager.clear(chatId);
 
   if (cleared) {
     res.json({ message: 'Session cleared' });
@@ -102,7 +102,7 @@ router.post('/sessions/:chatId/message', requireApiKey, async (req: Request, res
   }
 
   try {
-    session.sendMessage(message);
+    await session.sendMessage(message);
     res.json({ message: 'Message sent' });
   } catch (error) {
     logger.error('Failed to send message:', error);
@@ -114,7 +114,7 @@ router.post('/sessions/:chatId/message', requireApiKey, async (req: Request, res
  * Interrupt a session (Ctrl+C)
  * POST /api/sessions/:chatId/interrupt
  */
-router.post('/sessions/:chatId/interrupt', requireApiKey, (req: Request, res: Response) => {
+router.post('/sessions/:chatId/interrupt', requireApiKey, async (req: Request, res: Response) => {
   const { chatId } = req.params;
   const session = sessionManager.get(chatId);
 
@@ -128,8 +128,13 @@ router.post('/sessions/:chatId/interrupt', requireApiKey, (req: Request, res: Re
     return;
   }
 
-  session.interrupt();
-  res.json({ message: 'Interrupt signal sent' });
+  try {
+    await session.interrupt();
+    res.json({ message: 'Interrupt signal sent' });
+  } catch (error) {
+    logger.error('Failed to interrupt session:', error);
+    res.status(500).json({ error: 'Failed to interrupt session' });
+  }
 });
 
 export default router;

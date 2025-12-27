@@ -1,15 +1,17 @@
 import { Telegraf, Context, Markup } from 'telegraf';
 import { message } from 'telegraf/filters';
-import { ChatAdapter, IncomingMessage } from '@/adapters/BaseAdapter.js';
+import { ChatAdapter } from '@/adapters/BaseAdapter.js';
 import { sessionManager } from '@/sessions/SessionManager.js';
-import { formatForTelegram, detectConfirmationPrompt } from '@/utils/outputParser.js';
+import { chunkMessage } from '@/utils/messageFormatter.js';
 import { logger } from '@/utils/logger.js';
 import config from '@/config';
 import fs from 'fs';
 import path from 'path';
+import type { Session } from '@/sessions/Session.js';
 
 /**
  * Telegram bot adapter for OpenCode
+ * Now uses the OpenCode Server API for clean structured output
  */
 export class TelegramAdapter implements ChatAdapter {
   private bot: Telegraf;
@@ -179,22 +181,27 @@ export class TelegramAdapter implements ChatAdapter {
 
     let session = sessionManager.get(chatId);
 
-    if (session) {
-      await ctx.reply(`🔄 Switching to project: *${projectName}*...`, {
-        parse_mode: 'Markdown',
-      });
-      session.switchProject(projectPath);
-    } else {
-      session = sessionManager.getOrCreate(chatId, userId, projectPath);
-      this.setupSessionOutput(chatId, session);
-      session.start();
-      await ctx.reply(`📂 Started session in: *${projectName}*`, {
-        parse_mode: 'Markdown',
-      });
-    }
+    try {
+      if (session) {
+        await ctx.reply(`🔄 Switching to project: *${projectName}*...`, {
+          parse_mode: 'Markdown',
+        });
+        await session.switchProject(projectPath);
+      } else {
+        session = sessionManager.getOrCreate(chatId, userId, projectPath);
+        this.setupSessionOutput(chatId, session);
+        await session.start();
+        await ctx.reply(`📂 Started session in: *${projectName}*`, {
+          parse_mode: 'Markdown',
+        });
+      }
 
-    // Persist the session
-    sessionManager.persist(chatId);
+      // Persist the session
+      sessionManager.persist(chatId);
+    } catch (error) {
+      logger.error('Error switching project:', error);
+      await ctx.reply(`❌ Failed to switch to project: ${projectName}`);
+    }
   }
 
   /**
@@ -212,12 +219,14 @@ export class TelegramAdapter implements ChatAdapter {
     const data = session.toJSON();
     const status = session.getStatus();
     const running = session.isRunning() ? '✅ Running' : '❌ Stopped';
+    const opencodeSessionId = session.getOpencodeSessionId();
 
     await ctx.reply(
       `📊 *Session Status*\n\n` +
         `Status: ${status}\n` +
         `Process: ${running}\n` +
         `Project: \`${data.projectPath}\`\n` +
+        `OpenCode Session: \`${opencodeSessionId || 'N/A'}\`\n` +
         `Created: ${data.createdAt.toISOString()}\n` +
         `Last Activity: ${data.lastActivity.toISOString()}`,
       { parse_mode: 'Markdown' }
@@ -230,7 +239,7 @@ export class TelegramAdapter implements ChatAdapter {
   private async handleClear(ctx: Context): Promise<void> {
     const chatId = String(ctx.chat?.id);
 
-    if (sessionManager.clear(chatId)) {
+    if (await sessionManager.clear(chatId)) {
       await ctx.reply('🧹 Session cleared. Send a message to start a new one.');
     } else {
       await ctx.reply('📊 No active session to clear.');
@@ -245,8 +254,13 @@ export class TelegramAdapter implements ChatAdapter {
     const session = sessionManager.get(chatId);
 
     if (session?.isRunning()) {
-      session.interrupt();
-      await ctx.reply('⏹ Sent interrupt signal (Ctrl+C)');
+      try {
+        await session.interrupt();
+        await ctx.reply('⏹ Operation interrupted');
+      } catch (error) {
+        logger.error('Error interrupting session:', error);
+        await ctx.reply('❌ Failed to interrupt operation');
+      }
     } else {
       await ctx.reply('📊 No running operation to stop.');
     }
@@ -269,15 +283,58 @@ export class TelegramAdapter implements ChatAdapter {
     if (data.startsWith('switch:')) {
       const projectName = data.substring(7);
       await this.switchToProject(ctx, chatId, userId, projectName);
-    } else if (data === 'confirm:yes') {
+    } else if (data === 'permission:once') {
       const session = sessionManager.get(chatId);
       if (session) {
-        session.sendConfirmation(true);
+        try {
+          await session.replyToLatestPermission('once');
+          await ctx.reply('✅ Allowed once');
+        } catch (error) {
+          logger.error('Error replying to permission:', error);
+          await ctx.reply('❌ Failed to respond to permission');
+        }
+      }
+    } else if (data === 'permission:always') {
+      const session = sessionManager.get(chatId);
+      if (session) {
+        try {
+          await session.replyToLatestPermission('always');
+          await ctx.reply('✅ Always allowed');
+        } catch (error) {
+          logger.error('Error replying to permission:', error);
+          await ctx.reply('❌ Failed to respond to permission');
+        }
+      }
+    } else if (data === 'permission:reject') {
+      const session = sessionManager.get(chatId);
+      if (session) {
+        try {
+          await session.replyToLatestPermission('reject');
+          await ctx.reply('❌ Rejected');
+        } catch (error) {
+          logger.error('Error replying to permission:', error);
+          await ctx.reply('❌ Failed to respond to permission');
+        }
+      }
+    } else if (data === 'confirm:yes') {
+      // Legacy confirmation support - map to permission:once
+      const session = sessionManager.get(chatId);
+      if (session) {
+        try {
+          await session.sendConfirmation(true);
+        } catch (error) {
+          logger.error('Error sending confirmation:', error);
+        }
       }
     } else if (data === 'confirm:no') {
+      // Legacy confirmation support - map to permission:reject
       const session = sessionManager.get(chatId);
       if (session) {
-        session.sendConfirmation(false);
+        try {
+          await session.sendConfirmation(false);
+        } catch (error) {
+          logger.error('Error sending confirmation:', error);
+        }
       }
     }
   }
@@ -298,6 +355,7 @@ export class TelegramAdapter implements ChatAdapter {
       const restored = sessionManager.restore(chatId);
       if (restored) {
         session = restored;
+        this.setupSessionOutput(chatId, session);
       }
     }
 
@@ -310,8 +368,9 @@ export class TelegramAdapter implements ChatAdapter {
     // Start if not running
     if (!session.isRunning()) {
       try {
-        session.start();
         await ctx.reply('🚀 Starting OpenCode session...');
+        await session.start();
+        await ctx.reply('✅ OpenCode session ready!');
       } catch (error) {
         logger.error('Failed to start session:', error);
         await ctx.reply('❌ Failed to start OpenCode. Is it installed?');
@@ -321,7 +380,7 @@ export class TelegramAdapter implements ChatAdapter {
 
     // Send the message
     try {
-      session.sendMessage(text);
+      await session.sendMessage(text);
     } catch (error) {
       logger.error('Failed to send message:', error);
       await ctx.reply('❌ Failed to send message to OpenCode');
@@ -330,25 +389,31 @@ export class TelegramAdapter implements ChatAdapter {
 
   /**
    * Set up output handler for a session
+   * Now handles structured output from OpenCode Server API
    */
-  private setupSessionOutput(chatId: string, session: ReturnType<typeof sessionManager.get>): void {
+  private setupSessionOutput(chatId: string, session: Session | undefined): void {
     if (!session) return;
 
+    // Handle regular output
     session.onOutput(async (data: string) => {
       try {
-        // Check for confirmation prompt
-        if (detectConfirmationPrompt(data)) {
+        // Check if this looks like a permission request
+        if (data.includes('*Permission Required*')) {
           await this.bot.telegram.sendMessage(chatId, data, {
+            parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-              Markup.button.callback('✅ Yes', 'confirm:yes'),
-              Markup.button.callback('❌ No', 'confirm:no'),
+              [
+                Markup.button.callback('✅ Allow Once', 'permission:once'),
+                Markup.button.callback('✅ Always', 'permission:always'),
+              ],
+              [Markup.button.callback('❌ Reject', 'permission:reject')],
             ]),
           });
           return;
         }
 
-        // Format and send output
-        const chunks = formatForTelegram(data, { codeBlock: true });
+        // Chunk and send output
+        const chunks = chunkMessage(data, 4096);
 
         for (const chunk of chunks) {
           await this.bot.telegram.sendMessage(chatId, chunk, {
@@ -357,6 +422,59 @@ export class TelegramAdapter implements ChatAdapter {
         }
       } catch (error) {
         logger.error('Failed to send output to Telegram:', error);
+        // Try without markdown if it fails (might have unescaped characters)
+        try {
+          await this.bot.telegram.sendMessage(chatId, data);
+        } catch (retryError) {
+          logger.error('Failed to send plain text output:', retryError);
+        }
+      }
+    });
+
+    // Handle permission events
+    session.on('permission', async (permission) => {
+      try {
+        await this.bot.telegram.sendMessage(
+          chatId,
+          `🔐 *Permission Required*\n\n${permission.title}`,
+          {
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+              [
+                Markup.button.callback('✅ Allow Once', 'permission:once'),
+                Markup.button.callback('✅ Always', 'permission:always'),
+              ],
+              [Markup.button.callback('❌ Reject', 'permission:reject')],
+            ]),
+          }
+        );
+      } catch (error) {
+        logger.error('Failed to send permission request to Telegram:', error);
+      }
+    });
+
+    // Handle streaming text
+    // For now, we accumulate and let session.idle send the full response
+    // In the future, we could implement message editing for live updates
+
+    // Handle errors
+    session.on('error', async (error) => {
+      try {
+        await this.bot.telegram.sendMessage(chatId, `❌ Error: ${error.message}`);
+      } catch (sendError) {
+        logger.error('Failed to send error to Telegram:', sendError);
+      }
+    });
+
+    // Handle session terminated
+    session.on('terminated', async () => {
+      try {
+        await this.bot.telegram.sendMessage(
+          chatId,
+          '📴 Session ended. Send a message to start a new one.'
+        );
+      } catch (sendError) {
+        logger.error('Failed to send termination message:', sendError);
       }
     });
   }
@@ -393,7 +511,7 @@ export class TelegramAdapter implements ChatAdapter {
    * Send a message to a chat
    */
   async sendMessage(chatId: string, message: string): Promise<void> {
-    const chunks = formatForTelegram(message);
+    const chunks = chunkMessage(message, 4096);
     for (const chunk of chunks) {
       await this.bot.telegram.sendMessage(chatId, chunk);
     }

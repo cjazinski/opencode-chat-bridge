@@ -47,7 +47,10 @@ export class SessionManager {
     for (const [chatId, session] of this.sessions) {
       if (session.isTimedOut()) {
         logger.info(`Session ${session.id} timed out, terminating`);
-        session.terminate();
+        // Fire and forget - we don't need to wait for cleanup
+        session.terminate().catch((err) => {
+          logger.error(`Error terminating timed out session ${session.id}:`, err);
+        });
         this.sessions.delete(chatId);
       }
     }
@@ -86,12 +89,16 @@ export class SessionManager {
   /**
    * Clear/reset a session
    */
-  clear(chatId: string): boolean {
+  async clear(chatId: string): Promise<boolean> {
     const session = this.sessions.get(chatId);
     if (session) {
-      session.terminate();
       this.sessions.delete(chatId);
       this.deletePersistedSession(chatId);
+      try {
+        await session.terminate();
+      } catch (err) {
+        logger.error(`Error terminating session ${session.id}:`, err);
+      }
       logger.info(`Session cleared for chat ${chatId}`);
       return true;
     }
@@ -186,7 +193,7 @@ export class SessionManager {
   /**
    * Shutdown all sessions
    */
-  shutdown(): void {
+  async shutdown(): Promise<void> {
     logger.info('Shutting down all sessions...');
 
     if (this.cleanupInterval) {
@@ -194,11 +201,19 @@ export class SessionManager {
       this.cleanupInterval = null;
     }
 
-    for (const [chatId, session] of this.sessions) {
-      // Persist before terminating
+    // Persist all sessions first
+    for (const chatId of this.sessions.keys()) {
       this.persist(chatId);
-      session.terminate();
     }
+
+    // Terminate all sessions concurrently
+    const terminationPromises = Array.from(this.sessions.values()).map((session) =>
+      session.terminate().catch((err) => {
+        logger.error(`Error terminating session ${session.id}:`, err);
+      })
+    );
+
+    await Promise.all(terminationPromises);
 
     this.sessions.clear();
     logger.info('All sessions shut down');
