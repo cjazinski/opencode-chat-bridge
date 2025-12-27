@@ -1,0 +1,39 @@
+[Unit]
+Description=OpenCode Chat Bridge (Telegram Bot)
+Documentation=https://github.com/jazinski/opencode-chat-bridge
+After=network.target opencode-server.service
+Wants=opencode-server.service
+
+[Service]
+Type=simple
+
+# Working directory - install script will set this
+WorkingDirectory=%h/projects/opencode-chat-bridge
+
+# Environment setup
+Environment="HOME=%h"
+Environment="NODE_ENV=production"
+
+# Load environment from .env file
+EnvironmentFile=%h/projects/opencode-chat-bridge/.env
+
+# Connect to the OpenCode server service
+Environment="OPENCODE_SERVER_URL=http://127.0.0.1:4096"
+
+# Start the chat bridge - install script will update with correct node path
+ExecStart=/usr/bin/env node dist/index.js
+
+# Restart on failure
+Restart=on-failure
+RestartSec=5
+
+# Give OpenCode server time to start
+ExecStartPre=/bin/sleep 2
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=opencode-chat-bridge
+
+[Install]
+WantedBy=default.target

@@ -89,9 +89,14 @@ API_KEY=your-secure-api-key-here
 TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 TELEGRAM_ALLOWED_USERS=123456789  # Your Telegram user ID
 
-# OpenCode Server
-OPENCODE_SERVER_PORT=0            # 0 = auto-select port
-OPENCODE_SERVER_HOSTNAME=localhost
+# OpenCode Server - Choose ONE option:
+
+# Option 1: Connect to external server (used by systemd service)
+# OPENCODE_SERVER_URL=http://127.0.0.1:4096
+
+# Option 2: Start embedded server (default when URL not set)
+# OPENCODE_SERVER_PORT=0            # 0 = auto-select port
+# OPENCODE_SERVER_HOSTNAME=localhost
 
 # Projects
 PROJECTS_DIR=~/projects
@@ -139,6 +144,53 @@ npm run dev
 npm run build
 npm start
 ```
+
+### Running as a Systemd Service (Linux)
+
+For always-on operation, install as systemd user services:
+
+```bash
+# Build the project first
+npm run build
+
+# Install the services
+./scripts/install-services.sh
+
+# Start both services
+systemctl --user start opencode-server opencode-chat-bridge
+
+# Check status
+systemctl --user status opencode-server opencode-chat-bridge
+
+# View logs
+journalctl --user -u opencode-chat-bridge -f
+
+# Stop services
+systemctl --user stop opencode-chat-bridge opencode-server
+
+# Uninstall
+./scripts/install-services.sh --uninstall
+```
+
+**Enable services to start at boot** (without requiring login):
+
+```bash
+sudo loginctl enable-linger $USER
+```
+
+**After code changes:**
+
+```bash
+npm run build
+systemctl --user restart opencode-chat-bridge
+```
+
+The install script creates two services:
+
+| Service                | Description                           |
+| ---------------------- | ------------------------------------- |
+| `opencode-server`      | Headless OpenCode server on port 4096 |
+| `opencode-chat-bridge` | The Telegram bot (depends on server)  |
 
 ## Telegram Commands
 
@@ -238,6 +290,10 @@ opencode-chat-bridge/
 │   └── utils/
 │       ├── logger.ts         # Winston logger
 │       └── messageFormatter.ts # Message formatting utilities
+├── scripts/
+│   ├── install-services.sh   # Systemd service installer
+│   ├── opencode-server.service       # Template (reference only)
+│   └── opencode-chat-bridge.service  # Template (reference only)
 ├── package.json
 ├── tsconfig.json
 └── .env.example
@@ -339,6 +395,23 @@ This usually means SSE events aren't being received properly:
 1. Check OpenCode server is running (logs should show "OpenCode server started")
 2. Verify SSE subscription is active
 3. Try `/clear` and send a new message
+
+### Systemd service issues
+
+```bash
+# Check service status
+systemctl --user status opencode-server opencode-chat-bridge
+
+# View full logs
+journalctl --user -u opencode-server --no-pager
+journalctl --user -u opencode-chat-bridge --no-pager
+
+# Restart after fixing issues
+systemctl --user restart opencode-server opencode-chat-bridge
+
+# If services don't start at boot
+sudo loginctl enable-linger $USER
+```
 
 ## License
 

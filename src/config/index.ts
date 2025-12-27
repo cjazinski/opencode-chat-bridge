@@ -31,6 +31,7 @@ export interface Config {
   // OpenCode Server API
   opencodeServerPort: number; // Port for OpenCode server (0 = auto-select)
   opencodeServerHostname: string; // Hostname for OpenCode server
+  opencodeServerUrl: string | null; // Full URL to external OpenCode server (if set, port/hostname ignored)
 
   // Sessions
   sessionTimeoutMinutes: number;
@@ -67,6 +68,7 @@ export const config: Config = {
   // OpenCode Server API
   opencodeServerPort: parseInt(process.env.OPENCODE_SERVER_PORT || '0', 10),
   opencodeServerHostname: process.env.OPENCODE_SERVER_HOSTNAME || 'localhost',
+  opencodeServerUrl: process.env.OPENCODE_SERVER_URL || null,
 
   // Sessions
   sessionTimeoutMinutes: parseInt(process.env.SESSION_TIMEOUT_MINUTES || '30', 10),

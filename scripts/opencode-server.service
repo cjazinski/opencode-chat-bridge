@@ -1,0 +1,29 @@
+[Unit]
+Description=OpenCode Server (Headless)
+Documentation=https://opencode.ai/docs/server
+After=network.target
+
+[Service]
+Type=simple
+
+# Working directory - default project location
+WorkingDirectory=%h/projects
+
+# Environment setup - install script will detect and set PATH
+Environment="HOME=%h"
+
+# Start OpenCode server on localhost, port 4096
+# The install script will update ExecStart with the correct path
+ExecStart=/usr/bin/env opencode serve --hostname 127.0.0.1 --port 4096
+
+# Restart on failure
+Restart=on-failure
+RestartSec=5
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=opencode-server
+
+[Install]
+WantedBy=default.target

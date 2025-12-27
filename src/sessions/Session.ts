@@ -102,8 +102,13 @@ export class Session extends EventEmitter {
         autoStart: false,
       });
 
-      // Wait for it to be ready
-      await this.openCodeClient.start();
+      // Connect to external server or start a new one
+      if (config.opencodeServerUrl) {
+        logger.info(`Connecting to external OpenCode server at ${config.opencodeServerUrl}`);
+        await this.openCodeClient.connect(config.opencodeServerUrl);
+      } else {
+        await this.openCodeClient.start();
+      }
 
       // Set up event handlers
       this.setupEventHandlers();
