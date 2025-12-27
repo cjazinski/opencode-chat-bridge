@@ -35,7 +35,7 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/cjazinski/opencode-chat-bridge.git
+git clone https://github.com/jazinski/opencode-chat-bridge.git
 cd opencode-chat-bridge
 
 # Install dependencies
