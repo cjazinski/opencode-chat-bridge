@@ -58,12 +58,21 @@ export class SessionManager {
 
   /**
    * Get or create a session for a chat
+   * If no projectPath is provided, defaults to free chat mode
    */
   getOrCreate(chatId: string, userId: string, projectPath?: string): Session {
     let session = this.sessions.get(chatId);
 
     if (!session || session.getStatus() === 'terminated') {
-      const effectiveProjectPath = projectPath || config.projectsDir;
+      // Default to free chat directory if no project specified
+      const effectiveProjectPath = projectPath || config.freeChatDir;
+      
+      // Ensure the free chat directory exists
+      if (!projectPath && !fs.existsSync(config.freeChatDir)) {
+        fs.mkdirSync(config.freeChatDir, { recursive: true });
+        logger.info(`Created free chat directory: ${config.freeChatDir}`);
+      }
+      
       session = new Session(chatId, userId, effectiveProjectPath);
       this.sessions.set(chatId, session);
     }

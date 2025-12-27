@@ -503,9 +503,21 @@ export class TelegramAdapter implements ChatAdapter {
     // Start if not running
     if (!session.isRunning()) {
       try {
-        await ctx.reply('🚀 Starting OpenCode session...');
+        const isFreeChatMode = session.toJSON().projectPath === config.freeChatDir;
+        if (isFreeChatMode) {
+          await ctx.reply('💬 Starting free chat mode...');
+        } else {
+          await ctx.reply('🚀 Starting OpenCode session...');
+        }
         await session.start();
-        await ctx.reply('✅ OpenCode session ready!');
+        if (isFreeChatMode) {
+          await ctx.reply(
+            '✅ Ready! Ask me anything, or use `/projects` to switch to a coding project.',
+            { parse_mode: 'Markdown' }
+          );
+        } else {
+          await ctx.reply('✅ OpenCode session ready!');
+        }
       } catch (error) {
         logger.error('Failed to start session:', error);
         await ctx.reply('❌ Failed to start OpenCode. Is it installed?');
