@@ -9,6 +9,23 @@ import fs from 'fs';
 import path from 'path';
 import type { Session } from '@/sessions/Session.js';
 
+/** Thinking indicator state */
+interface ThinkingState {
+  messageId: number;
+  intervalId: NodeJS.Timeout;
+  startTime: number;
+}
+
+/** Thinking phrases to cycle through */
+const THINKING_PHRASES = [
+  '🤔 Thinking...',
+  '🔍 Analyzing...',
+  '💭 Processing...',
+  '⚙️ Working on it...',
+  '🧠 Reasoning...',
+  '📝 Composing response...',
+];
+
 /**
  * Telegram bot adapter for OpenCode
  * Now uses the OpenCode Server API for clean structured output
@@ -16,6 +33,7 @@ import type { Session } from '@/sessions/Session.js';
 export class TelegramAdapter implements ChatAdapter {
   private bot: Telegraf;
   private isRunning: boolean = false;
+  private thinkingStates: Map<string, ThinkingState> = new Map();
 
   constructor() {
     if (!config.telegramBotToken) {
@@ -385,9 +403,15 @@ export class TelegramAdapter implements ChatAdapter {
     // Send the message
     try {
       logger.info(`Sending message to OpenCode session...`);
+
+      // Start thinking indicator
+      await this.startThinking(chatId);
+
       await session.sendMessage(text);
       logger.info(`Message sent successfully`);
     } catch (error) {
+      // Stop thinking on error
+      await this.stopThinking(chatId);
       logger.error('Failed to send message:', error);
       await ctx.reply('❌ Failed to send message to OpenCode');
     }
@@ -402,6 +426,9 @@ export class TelegramAdapter implements ChatAdapter {
 
     // Handle regular output
     session.onOutput(async (data: string) => {
+      // Stop thinking indicator when we get output
+      await this.stopThinking(chatId);
+
       try {
         // Check if this looks like a permission request
         if (data.includes('*Permission Required*')) {
@@ -465,6 +492,9 @@ export class TelegramAdapter implements ChatAdapter {
 
     // Handle errors
     session.on('error', async (error) => {
+      // Stop thinking indicator on error
+      await this.stopThinking(chatId);
+
       try {
         await this.bot.telegram.sendMessage(chatId, `❌ Error: ${error.message}`);
       } catch (sendError) {
@@ -474,6 +504,9 @@ export class TelegramAdapter implements ChatAdapter {
 
     // Handle session terminated
     session.on('terminated', async () => {
+      // Stop thinking indicator on termination
+      await this.stopThinking(chatId);
+
       try {
         await this.bot.telegram.sendMessage(
           chatId,
@@ -543,5 +576,76 @@ export class TelegramAdapter implements ChatAdapter {
    */
   getName(): string {
     return 'telegram';
+  }
+
+  /**
+   * Start showing a thinking indicator for a chat
+   */
+  private async startThinking(chatId: string): Promise<void> {
+    // Clear any existing thinking state
+    await this.stopThinking(chatId);
+
+    try {
+      // Send initial thinking message
+      const msg = await this.bot.telegram.sendMessage(chatId, THINKING_PHRASES[0]);
+
+      // Start periodic updates
+      let phraseIndex = 0;
+      const intervalId = setInterval(async () => {
+        try {
+          // Send typing action
+          await this.bot.telegram.sendChatAction(chatId, 'typing');
+
+          // Update the thinking message with next phrase
+          phraseIndex = (phraseIndex + 1) % THINKING_PHRASES.length;
+          const state = this.thinkingStates.get(chatId);
+          if (state) {
+            const elapsed = Math.floor((Date.now() - state.startTime) / 1000);
+            const timeStr = elapsed > 5 ? ` (${elapsed}s)` : '';
+            await this.bot.telegram.editMessageText(
+              chatId,
+              state.messageId,
+              undefined,
+              `${THINKING_PHRASES[phraseIndex]}${timeStr}`
+            );
+          }
+        } catch (error) {
+          // Ignore edit errors (message might be deleted)
+          logger.debug('Failed to update thinking indicator:', error);
+        }
+      }, 3000); // Update every 3 seconds
+
+      this.thinkingStates.set(chatId, {
+        messageId: msg.message_id,
+        intervalId,
+        startTime: Date.now(),
+      });
+
+      // Also send initial typing action
+      await this.bot.telegram.sendChatAction(chatId, 'typing');
+    } catch (error) {
+      logger.error('Failed to start thinking indicator:', error);
+    }
+  }
+
+  /**
+   * Stop the thinking indicator for a chat
+   */
+  private async stopThinking(chatId: string): Promise<void> {
+    const state = this.thinkingStates.get(chatId);
+    if (!state) return;
+
+    // Clear the interval
+    clearInterval(state.intervalId);
+
+    // Delete the thinking message
+    try {
+      await this.bot.telegram.deleteMessage(chatId, state.messageId);
+    } catch (error) {
+      // Ignore delete errors (message might already be deleted)
+      logger.debug('Failed to delete thinking message:', error);
+    }
+
+    this.thinkingStates.delete(chatId);
   }
 }
