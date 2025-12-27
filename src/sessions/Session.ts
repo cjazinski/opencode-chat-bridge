@@ -472,10 +472,10 @@ export class Session extends EventEmitter {
     this.opencodeSessionId = null;
     this.status = 'terminated';
     this.pendingPermissions.clear();
-    this.offOutput();
 
-    // Don't emit 'terminated' if we're just switching projects
+    // Don't clear output callback if we're switching projects (need to keep it)
     if (!this.isSwitchingProject) {
+      this.offOutput();
       this.emit('terminated');
     }
   }
