@@ -444,6 +444,18 @@ export class TelegramAdapter implements ChatAdapter {
     }
   }
 
+  /** Known commands (without the leading slash) */
+  private static readonly KNOWN_COMMANDS = new Set([
+    'start',
+    'help',
+    'chat',
+    'projects',
+    'switch',
+    'status',
+    'clear',
+    'stop',
+  ]);
+
   /**
    * Handle regular text messages
    */
@@ -451,6 +463,20 @@ export class TelegramAdapter implements ChatAdapter {
     const chatId = String(ctx.chat?.id);
     const userId = String(ctx.from?.id);
     const text = (ctx.message as { text?: string })?.text || '';
+
+    // Check for unknown commands (messages starting with / that aren't known)
+    if (text.startsWith('/')) {
+      const command = text.slice(1).split(/\s+/)[0].split('@')[0].toLowerCase();
+      if (!TelegramAdapter.KNOWN_COMMANDS.has(command)) {
+        await ctx.reply(
+          `❓ Unknown command: \`/${command}\`\n\n` + `Use /help to see available commands.`,
+          { parse_mode: 'Markdown' }
+        );
+        return;
+      }
+      // Known command - let the command handlers deal with it
+      return;
+    }
 
     logger.info(`Received message from ${chatId}: "${text.substring(0, 50)}..."`);
 
