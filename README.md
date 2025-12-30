@@ -260,22 +260,37 @@ systemctl --user restart opencode-chat-bridge
 
 The install script creates two services:
 
-| Service                | Description                           |
-| ---------------------- | ------------------------------------- |
-| `opencode-server`      | Headless OpenCode server on port 4096 |
-| `opencode-chat-bridge` | The Telegram bot (depends on server)  |
+| Service                | Description                             |
+| ---------------------- | --------------------------------------- |
+| `opencode-server`      | Headless OpenCode server on port 4096   |
+| `opencode-chat-bridge` | Chat bridge for Telegram and Slack bots |
 
 ## Telegram Commands
 
-| Command          | Description                           |
-| ---------------- | ------------------------------------- |
-| `/start`         | Start the bot and show help           |
-| `/help`          | Show available commands               |
-| `/projects`      | List available projects in ~/projects |
-| `/switch <name>` | Switch to a different project         |
-| `/status`        | Show current session status           |
-| `/clear`         | Clear/reset the current session       |
-| `/stop`          | Interrupt current operation           |
+| Command          | Description                                |
+| ---------------- | ------------------------------------------ |
+| `/start`         | Start the bot and show help                |
+| `/help`          | Show available commands                    |
+| `/chat [new]`    | Start free chat mode (no project required) |
+| `/projects`      | List available projects with buttons       |
+| `/switch <name>` | Switch to a different project              |
+| `/status`        | Show current session status                |
+| `/clear`         | Clear/reset the current session            |
+| `/stop`          | Interrupt current operation                |
+
+## Slack Commands
+
+The Slack bot supports the following slash commands:
+
+| Command          | Description                                |
+| ---------------- | ------------------------------------------ |
+| `/help`          | Show available commands                    |
+| `/chat [new]`    | Start free chat mode (no project required) |
+| `/projects`      | List available projects with buttons       |
+| `/switch <name>` | Switch to a different project              |
+| `/status`        | Show current session status                |
+| `/clear`         | Clear/reset the current session            |
+| `/stop`          | Interrupt current operation                |
 
 ## Slack Usage
 
@@ -288,11 +303,26 @@ The Slack bot responds to all messages in channels where it's invited:
 Each user in each channel gets their own OpenCode session. Sessions persist
 across restarts.
 
-**Current limitations**:
+### Interactive Features
 
-- No slash commands yet (coming soon)
-- No project switching UI (uses default project from `PROJECTS_DIR`)
-- Responses limited to 3000 characters per message (auto-chunked)
+**Project Switching**: Use `/projects` to see clickable buttons for all
+available projects. Tap a button to instantly switch, or use
+`/switch <project-name>` to switch by typing.
+
+**Permission Handling**: When OpenCode needs permission for an action (file
+writes, command execution), you'll see buttons: **✅ Allow Once**, **✅
+Always**, **❌ Reject**. Tap to respond instantly.
+
+**Thinking Indicator**: While waiting for responses, you'll see an animated
+indicator that cycles through phrases like "🤔 Thinking...", "🔍 Analyzing...",
+showing elapsed time after 5 seconds.
+
+**Free Chat Mode**: Use `/chat` to start a general conversation mode without
+needing a project. Great for brainstorming, asking questions, or getting help
+with anything.
+
+**Note**: Responses are automatically split into chunks if they exceed 3000
+characters (Slack message limit).
 
 ## Features in Detail
 
