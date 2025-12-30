@@ -89,7 +89,7 @@ export class SlackAdapter implements ChatAdapter {
     // Slash command handlers
     this.app.command('/projects', this.handleProjects.bind(this));
     this.app.command('/switch', this.handleSwitch.bind(this));
-    this.app.command('/status', this.handleStatus.bind(this));
+    this.app.command('/ai-status', this.handleStatus.bind(this));
     this.app.command('/clear', this.handleClear.bind(this));
     this.app.command('/stop', this.handleStop.bind(this));
     this.app.command('/help', this.handleHelp.bind(this));
@@ -198,7 +198,7 @@ export class SlackAdapter implements ChatAdapter {
         `/chat - Free chat mode (no project needed)\n` +
         `/projects - List available projects\n` +
         `/switch <project> - Switch to a project\n` +
-        `/status - Show session status\n` +
+        `/ai-status - Show session status\n` +
         `/clear - Clear/reset session\n` +
         `/stop - Stop current operation\n` +
         `/help - Show this help\n\n` +

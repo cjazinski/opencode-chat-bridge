@@ -288,7 +288,7 @@ The Slack bot supports the following slash commands:
 | `/chat [new]`    | Start free chat mode (no project required) |
 | `/projects`      | List available projects with buttons       |
 | `/switch <name>` | Switch to a different project              |
-| `/status`        | Show current session status                |
+| `/ai-status`     | Show current session status                |
 | `/clear`         | Clear/reset the current session            |
 | `/stop`          | Interrupt current operation                |
 
